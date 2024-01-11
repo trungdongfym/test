@@ -1,2 +1,312 @@
-changed
-changed1
+
+import { changeCpRuleStatus, deleteCpRule, duplicateCpRule } from '@/apis/modules/cpApi';
+import { Pagination } from '@/components/ui/pagination';
+import { useShopDomain } from '@/hooks';
+import logger from '@/libs/logger';
+import { initBulkActions, removeRulesCached, sortRuleByKey } from '@/utils/ruleUtils';
+import { formatDate } from '@/utils/timeUtils';
+import { useNavigate, useToast } from '@shopify/app-bridge-react';
+import {
+    Badge,
+    BlockStack,
+    Box,
+    Card,
+    IndexFilters,
+    IndexTable,
+    Modal,
+    Text,
+    useIndexResourceState,
+    useSetIndexFiltersMode,
+} from '@shopify/polaris';
+import { useCallback, useMemo, useState } from 'react';
+import { ActionsRule } from '../../resources/common';
+
+const sortOptions = [
+    { label: 'Name', value: 'name asc', directionLabel: 'A-Z' },
+    { label: 'Name', value: 'name desc', directionLabel: 'Z-A' },
+    { label: 'Priority', value: 'priority asc', directionLabel: 'Ascending' },
+    { label: 'Priority', value: 'priority desc', directionLabel: 'Descending' },
+    { label: 'Created Date', value: 'createdAt asc', directionLabel: 'Ascending' },
+    { label: 'Created Date', value: 'createdAt desc', directionLabel: 'Descending' },
+];
+
+const headers = [
+    { title: 'Name' },
+    { title: 'Status' },
+    { title: 'Priority' },
+    { title: 'Created Date' },
+    { title: 'Action' },
+];
+
+const sortMap = {
+    name: 0,
+    priority: 2,
+    createdAt: 3,
+};
+
+const sortTypeMap = {
+    ascending: 'asc',
+    descending: 'desc',
+    asc: 'ascending',
+    desc: 'descending',
+};
+
+const resourceName = {
+    singular: 'rule',
+    plural: 'rules',
+};
+
+export function CpRuleTable({ rules, loading, currentPage, totalPage, onPageChange, onSearchChange, totalRules }) {
+    const domain = useShopDomain();
+    const navigate = useNavigate();
+    const [deleteRuleId, setDeleteRuleId] = useState(false);
+    const [openDialog, setOpenDialog] = useState(false);
+    const [sortedRows, setSortedRows] = useState(null);
+    const [sortColumns, setSortColumns] = useState({ headingIndex: null, direction: 'ascending' });
+    const { mode, setMode } = useSetIndexFiltersMode();
+    const { show: showToast } = useToast();
+    const [nameSearch, setNameSearch] = useState('');
+    const [sortSelected, setSortSelected] = useState(['name asc']);
+
+    const handleOpenDialog = useCallback(() => {
+        setOpenDialog(!openDialog);
+    }, [openDialog]);
+
+    const handleOnclick = useCallback(
+        (path) => {
+            navigate(path);
+        },
+        [navigate]
+    );
+
+    const handleDuplicate = useCallback(
+        async (ruleId) => {
+            const duplicateRuleRes = await duplicateCpRule({ domain, ruleId });
+
+            if (duplicateRuleRes.success) {
+                navigate('/cp');
+                showToast('Duplicate rule success');
+                logger.writeLog('cp.handleDuplicate', domain, 'Handle duplicate cp rule successfully', '', 'success');
+            } else {
+                showToast('Duplicate rule failed', {
+                    isError: true,
+                });
+                logger.writeLog('cp.handleDuplicate', domain, 'Handle duplicate cp rule failed', '', 'failed');
+            }
+        },
+        [domain, navigate, showToast]
+    );
+
+    const deleteRule = useCallback(async () => {
+        let arrayDeleteRuleId = [];
+        if (Array.isArray(deleteRuleId)) {
+            arrayDeleteRuleId = deleteRuleId;
+        } else {
+            arrayDeleteRuleId.push(deleteRuleId);
+        }
+        const deleteRuleRes = await deleteCpRule({ domain, arrayDeleteRuleId });
+
+        if (deleteRuleRes.success) {
+            removeRulesCached(arrayDeleteRuleId, 'cp', domain);
+            setOpenDialog(!openDialog);
+            navigate('/cp');
+            logger.writeLog('cp.deleteRule', domain, 'Delete cp rule successfully', '', 'success');
+        } else {
+            logger.writeLog('cp.deleteRule', domain, 'Delete cp rule failed', '', 'failed');
+        }
+    }, [deleteRuleId, domain, openDialog, navigate]);
+
+    const rowItems = useMemo(() => {
+        return rules.map((rule) => {
+            const ruleId = rule.id;
+            return {
+                id: ruleId,
+                name: rule.name,
+                status: <Badge tone={rule.status ? 'success' : ''}>{rule.status ? 'Enable' : 'Disable'}</Badge>,
+                priority: rule.priority,
+                createdAt: rule.createdAt,
+                action: (
+                    <ActionsRule
+                        dataKey={ruleId}
+                        onEdit={() => handleOnclick(`/cp/${ruleId}`)}
+                        onDuplicate={() => handleDuplicate(ruleId)}
+                        onDelete={() => {
+                            setDeleteRuleId(ruleId);
+                            handleOpenDialog();
+                        }}
+                    />
+                ),
+            };
+        });
+    }, [rules, handleDuplicate, handleOnclick, handleOpenDialog]);
+
+    const rows = useMemo(() => {
+        return sortedRows ? sortedRows : rowItems;
+    }, [sortedRows, rowItems]);
+    const { selectedResources, allResourcesSelected, handleSelectionChange } = useIndexResourceState(rows);
+
+    const handleChangeActiveStatus = useCallback(
+        async function handleChangeActiveStatus(ruleId, status) {
+            const resJson = await changeCpRuleStatus({ domain, ruleId, status });
+            if (resJson.success) {
+                navigate('/cp');
+                logger.writeLog('cp.ChangActiveStatus', domain, 'Change Active Status successfully', 'success');
+            } else {
+                logger.writeLog('cp.ChangActiveStatus', domain, 'Change Active Status failed', 'failed');
+            }
+        },
+        [domain, navigate]
+    );
+    const bulkActions = useMemo(() => {
+        return initBulkActions(selectedResources, handleChangeActiveStatus, setDeleteRuleId, handleOpenDialog);
+    }, [selectedResources, handleChangeActiveStatus, setDeleteRuleId, handleOpenDialog]);
+
+    const handleChangeNameSearch = useCallback(
+        (value) => {
+            setNameSearch(value);
+            onSearchChange(value);
+            onPageChange(1);
+        },
+        [setNameSearch, onSearchChange, onPageChange]
+    );
+
+    const handleClearBtnClick = useCallback(() => {
+        if (loading) return;
+        setNameSearch('');
+        onSearchChange('');
+        onPageChange(1);
+    }, [loading, onSearchChange, onPageChange]);
+
+    const handleSort = (value) => {
+        setSortSelected(value);
+        const sortInfo = value[0].split(' ');
+        const [sortKey, sortType] = sortInfo;
+        const newSortedRows = sortRuleByKey(rows, sortKey, sortType);
+        setSortedRows(newSortedRows);
+        setSortColumns({
+            headingIndex: sortMap[sortKey] || null,
+            direction: sortTypeMap[sortType],
+        });
+    };
+
+    const handleSortColumn = useCallback(
+        (index, direction) => {
+            const type = sortTypeMap[direction];
+            if (index === sortMap['name']) {
+                setSortedRows(sortRuleByKey(rows, 'name', type));
+                setSortSelected([`name ${type}`]);
+            }
+            if (index === sortMap['priority']) {
+                setSortedRows(sortRuleByKey(rows, 'priority', type));
+                setSortSelected([`priority ${type}`]);
+            }
+            if (index === sortMap['createdAt']) {
+                setSortedRows(sortRuleByKey(rows, 'createdAt', type));
+                setSortSelected([`createdAt ${type}`]);
+            }
+            setSortColumns((prev) => ({
+                headingIndex: index,
+                direction:
+                    index === prev.headingIndex
+                        ? prev.direction === 'ascending'
+                            ? 'descending'
+                            : 'ascending'
+                        : 'descending',
+            }));
+        },
+        [rows]
+    );
+
+    const handleChangePage = (newPage) => {
+        handleSelectionChange([]);
+        onPageChange(newPage);
+    };
+
+    return (
+        <BlockStack gap="400">
+            <Card padding="0">
+                <IndexFilters
+                    queryValue={nameSearch}
+                    queryPlaceholder="Search rule"
+                    onQueryChange={handleChangeNameSearch}
+                    onQueryClear={handleClearBtnClick}
+                    sortOptions={sortOptions}
+                    sortSelected={sortSelected}
+                    onSort={handleSort}
+                    mode={mode}
+                    setMode={setMode}
+                    loading={loading}
+                    tabs={[]}
+                    filters={[]}
+                    cancelAction={{}}
+                />
+                {rows.length > 0 && (
+                    <Box padding="300" paddingInlineStart="500">
+                        <Text fontWeight="medium">
+                            Showing {rows.length} of {totalRules} rules
+                        </Text>
+                    </Box>
+                )}
+                <IndexTable
+                    resourceName={resourceName}
+                    itemCount={rows.length}
+                    selectedItemsCount={allResourcesSelected ? 'All' : selectedResources.length}
+                    onSelectionChange={handleSelectionChange}
+                    headings={headers}
+                    loading={loading}
+                    bulkActions={bulkActions}
+                    lastColumnSticky
+                    sortable={[true, false, true, true, false]}
+                    onSort={handleSortColumn}
+                    sortColumnIndex={sortColumns.headingIndex}
+                    sortDirection={sortColumns.direction}
+                >
+                    {rows.map(({ id, ...item }, index) => (
+                        <IndexTable.Row id={id} key={id} selected={selectedResources.includes(id)} position={index}>
+                            {Object.entries(item).map(([key, value], index) =>
+                                key === 'createdAt' ? (
+                                    <IndexTable.Cell key={index}>{formatDate(value)}</IndexTable.Cell>
+                                ) : key === 'name' ? (
+                                    <IndexTable.Cell key={index}>
+                                        <Box maxWidth="200px">
+                                            <Text truncate>{value}</Text>
+                                        </Box>
+                                    </IndexTable.Cell>
+                                ) : (
+                                    <IndexTable.Cell key={index}>{value}</IndexTable.Cell>
+                                )
+                            )}
+                        </IndexTable.Row>
+                    ))}
+                </IndexTable>
+            </Card>
+            <Modal
+                open={openDialog}
+                onClose={handleOpenDialog}
+                title="Delete rule"
+                primaryAction={{
+                    content: 'Delete',
+                    onAction: deleteRule,
+                }}
+                secondaryActions={[
+                    {
+                        content: 'Cancel',
+                        onAction: handleOpenDialog,
+                    },
+                ]}
+            >
+                <Modal.Section>
+                    <Text>This can’t be undone.</Text>
+                </Modal.Section>
+            </Modal>
+            {totalPage > 1 && (
+                <Pagination
+                    loading={loading}
+                    totalPage={totalPage}
+                    currentPage={currentPage}
+                    onPageChange={handleChangePage}
+                />
+            )}
+        </BlockStack>
+    );
+}
